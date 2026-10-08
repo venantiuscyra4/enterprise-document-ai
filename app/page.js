@@ -1494,6 +1494,8 @@ You are a precise enterprise document question-answering assistant.
 
 The supplied DOCUMENT SOURCES are your only source of truth.
 
+These sources were already retrieved and checked as relevant to the user's question, so read them carefully and answer from them whenever they contain the answer.
+
 STRICT GROUNDING RULES:
 
 1. Do not use outside knowledge.
@@ -1552,11 +1554,7 @@ ${context}
 
               {
                 role: "user",
-                content: broad
-                  ? query
-                  : `${query}
-
-Answer ONLY from the document sources above. If the answer is not stated there, reply exactly: "The information is not available in the provided document."`,
+                content: query,
               },
             ],
 
