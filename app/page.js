@@ -15,13 +15,7 @@ const EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
 const LLM_MODEL =
   "SmolLM2-360M-Instruct-q4f32_1-MLC";
 
-/* Retrieval and evidence-gate settings (tune using the debug numbers in the Sources panel) */
-const MIN_SIMILARITY = 0.30; // minimum cosine similarity for a chunk to be considered
-const SEMANTIC_WEIGHT = 0.7;
-const LEXICAL_WEIGHT = 0.3;
-const MIN_HYBRID_SCORE = 0.40; // minimum hybrid score for the best chunk
-const MIN_KEYWORD_COVERAGE = 0.5; // best chunk must cover MORE than this share of key terms
-const STRONG_SEMANTIC_SCORE = 0.60; // a very strong semantic match can pass without keywords
+const MIN_SIMILARITY = 0.30;
 
 const MAX_PDF_SIZE_MB = 25;
 
@@ -224,129 +218,6 @@ function textSimilarity(textA, textB) {
   return union === 0
     ? 0
     : intersection / union;
-}
-
-/* =========================================================
-   KEYWORD (LEXICAL) MATCHING
-   Used for hybrid retrieval and the evidence gate.
-========================================================= */
-
-const STOPWORDS = new Set(
-  (
-    "the a an is are was were be been being do does did what which who whom whose when where why how " +
-    "many much long far often can could should would will shall may might must i me my we our you your " +
-    "they their it its this that these those of in on at to for from by with about as into per and or " +
-    "if then there any some get got have has had need needs needed tell give explain please company s " +
-    "document pdf file year years time times each number minimum maximum length held"
-  ).split(" ")
-);
-
-function stemWord(word) {
-  if (word.length > 4 && word.endsWith("ies")) {
-    return word.slice(0, -3) + "y";
-  }
-  if (word.length > 5 && word.endsWith("ing")) {
-    return word.slice(0, -3);
-  }
-  if (word.length > 4 && word.endsWith("ed")) {
-    return word.slice(0, -2);
-  }
-  if (word.length > 4 && word.endsWith("es")) {
-    return word.slice(0, -2);
-  }
-  if (word.length > 3 && word.endsWith("s")) {
-    return word.slice(0, -1);
-  }
-  return word;
-}
-
-function getKeyTerms(query) {
-  const terms = normalizeText(query)
-    .split(" ")
-    .filter(Boolean)
-    .filter((word) => !STOPWORDS.has(word))
-    .filter((word) => word.length > 1 || /\d/.test(word))
-    .map(stemWord);
-
-  return [...new Set(terms)];
-}
-
-function termMatches(termStem, wordStem) {
-  if (termStem === wordStem) {
-    return true;
-  }
-
-  const shortest = Math.min(termStem.length, wordStem.length);
-
-  return (
-    shortest >= 4 &&
-    (termStem.startsWith(wordStem) ||
-      wordStem.startsWith(termStem))
-  );
-}
-
-/*
- * Stems of every word in the active documents. Used to detect question
- * terms that appear NOWHERE in the documents (strong evidence that the
- * question is outside the document).
- */
-function buildCorpusStems(texts) {
-  const stems = new Set();
-
-  for (const text of texts) {
-    for (const word of normalizeText(text).split(" ")) {
-      if (word) {
-        stems.add(stemWord(word));
-      }
-    }
-  }
-
-  return stems;
-}
-
-function termInCorpus(term, corpusStems) {
-  for (const stem of corpusStems) {
-    if (termMatches(term, stem)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-/*
- * Weighted share of the question's key terms found in the text.
- * Terms missing from the whole corpus count double, so a question about
- * something the document never mentions cannot pass on filler words.
- * Returns 1 when the question has no key terms (rely on embeddings).
- */
-function keywordCoverage(keyTerms, text, corpusStems) {
-  if (!keyTerms.length) {
-    return 1;
-  }
-
-  const textStems = normalizeText(text)
-    .split(" ")
-    .filter(Boolean)
-    .map(stemWord);
-
-  let matchedWeight = 0;
-  let totalWeight = 0;
-
-  for (const term of keyTerms) {
-    const absent =
-      corpusStems && !termInCorpus(term, corpusStems);
-
-    const weight = absent ? 2 : 1;
-
-    totalWeight += weight;
-
-    if (textStems.some((stem) => termMatches(term, stem))) {
-      matchedWeight += weight;
-    }
-  }
-
-  return matchedWeight / totalWeight;
 }
 
 /* =========================================================
@@ -1178,47 +1049,17 @@ export default function Home() {
           )
       );
 
-    const keyTerms =
-      getKeyTerms(query);
-
-    const corpusStems =
-      buildCorpusStems(
-        allEmbeddings.map(
-          (item) => item.text
-        )
-      );
-
     const scored =
       allEmbeddings
-        .map((item) => {
-          const cosine =
+        .map((item) => ({
+          ...item,
+
+          score:
             cosineSimilarity(
               queryVector,
               item.vector
-            );
-
-          const coverage =
-            keywordCoverage(
-              keyTerms,
-              item.text,
-              corpusStems
-            );
-
-          return {
-            ...item,
-
-            cosine,
-
-            coverage,
-
-            /* Hybrid score: 70% semantic + 30% lexical */
-            score:
-              SEMANTIC_WEIGHT *
-                cosine +
-              LEXICAL_WEIGHT *
-                coverage,
-          };
-        })
+            ),
+        }))
         .sort(
           (a, b) =>
             b.score - a.score
@@ -1232,10 +1073,7 @@ export default function Home() {
       const broadResults =
         getBroadDocumentResults(
           activeDocuments,
-          scored.map((item) => ({
-            ...item,
-            score: item.cosine,
-          }))
+          scored
         );
 
       return broadResults.map(
@@ -1260,54 +1098,21 @@ export default function Home() {
         candidates
       );
 
-    const relevant = unique
+    return unique
       .filter(
         (item) =>
-          item.cosine >=
-            MIN_SIMILARITY &&
           item.score >=
-            MIN_HYBRID_SCORE
+          MIN_SIMILARITY
       )
-      .slice(0, 4);
+      .slice(0, 4)
+      .map(
+        (item, index) => ({
+          ...item,
 
-    /* =====================================================
-       EVIDENCE GATE
-
-       Refuse BEFORE calling the LLM unless the best chunk
-       is supported by the question's keywords (or by a very
-       strong semantic match).
-    ===================================================== */
-
-    const best = relevant[0];
-
-    const supported =
-      !!best &&
-      (best.coverage >
-        MIN_KEYWORD_COVERAGE ||
-        best.cosine >=
-          STRONG_SEMANTIC_SCORE);
-
-    console.log("[Retrieval debug]", {
-      query,
-      keyTerms,
-      bestCosine: scored[0]?.cosine,
-      bestCoverage: scored[0]?.coverage,
-      bestHybrid: scored[0]?.score,
-      passedGate: supported,
-    });
-
-    if (!supported) {
-      return [];
-    }
-
-    return relevant.map(
-      (item, index) => ({
-        ...item,
-
-        sourceNumber:
-          index + 1,
-      })
-    );
+          sourceNumber:
+            index + 1,
+        })
+      );
   }
 
   /* =======================================================
@@ -1494,8 +1299,6 @@ You are a precise enterprise document question-answering assistant.
 
 The supplied DOCUMENT SOURCES are your only source of truth.
 
-These sources were already retrieved and checked as relevant to the user's question, so read them carefully and answer from them whenever they contain the answer.
-
 STRICT GROUNDING RULES:
 
 1. Do not use outside knowledge.
@@ -1585,13 +1388,6 @@ ${context}
           "The information is not available in the provided document.";
       }
 
-      const refused =
-        answer
-          .toLowerCase()
-          .includes(
-            "not available in the provided document"
-          );
-
       setMessages(
         (previous) => [
           ...previous,
@@ -1600,9 +1396,7 @@ ${context}
 
             content: answer,
 
-            sources: refused
-              ? []
-              : results,
+            sources: results,
           },
         ]
       );
@@ -1755,7 +1549,7 @@ ${context}
 
           <Stat
             label="Retrieval Threshold"
-            value={MIN_HYBRID_SCORE.toFixed(
+            value={MIN_SIMILARITY.toFixed(
               2
             )}
           />
@@ -2160,22 +1954,10 @@ ${context}
                             </div>
 
                             <span className="text-xs text-slate-600">
-                              Hybrid{" "}
+                              Similarity{" "}
                               {source.score.toFixed(
-                                3
-                              )}{" "}
-                              · Cosine{" "}
-                              {(
-                                source.cosine ??
-                                source.score
-                              ).toFixed(3)}{" "}
-                              · Keywords{" "}
-                              {source.coverage !==
-                              undefined
-                                ? source.coverage.toFixed(
-                                    2
-                                  )
-                                : "-"}
+                                4
+                              )}
                             </span>
                           </div>
 
